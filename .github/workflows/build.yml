@@ -1,0 +1,71 @@
+# Builds the firmware on every push and pull request.
+# On every push to main it also refreshes the "latest" GitHub release, so the newest
+# ready-to-flash firmware is always at:
+#   https://github.com/<owner>/<repo>/releases/tag/latest
+name: Build firmware
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md", "docs/**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+
+      - name: Build
+        run: pio run -e m5stack-fire
+
+      - name: Package firmware
+        run: |
+          set -e
+          B=.pio/build/m5stack-fire
+          BOOT_APP0=$(find ~/.platformio/packages/framework-arduinoespressif32/tools/partitions -name boot_app0.bin | head -1)
+          ESPTOOL=~/.platformio/packages/tool-esptoolpy/esptool.py
+          mkdir -p out
+          python "$ESPTOOL" --chip esp32 merge_bin -o out/tinyml-vibration-factory.bin \
+            --flash_mode keep --flash_freq keep --flash_size keep \
+            0x1000 $B/bootloader.bin 0x8000 $B/partitions.bin 0xe000 "$BOOT_APP0" 0x10000 $B/firmware.bin
+          cp $B/firmware.bin out/tinyml-vibration-app.bin
+          ls -la out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: out/*.bin
+
+      - name: Update "latest" release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest out/*.bin \
+            --target "$GITHUB_SHA" \
+            --title "Latest build (${GITHUB_SHA::7})" \
+            --notes "Built automatically from ${GITHUB_SHA::7} on $(date -u +'%Y-%m-%d %H:%M UTC').
+
+          - **tinyml-vibration-factory.bin**: full image, flash at **0x0** (fresh install; also clears the saved model).
+          - **tinyml-vibration-app.bin**: app only, flash at **0x10000** (keeps the saved model and settings).
+
+          See the README for flashing steps."
